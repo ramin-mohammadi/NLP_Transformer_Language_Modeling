@@ -10,12 +10,6 @@ import matplotlib.pyplot as plt
 from typing import List
 from utils import *
 
-# dont use positional encoding
-# TASK='BEFOREAFTER'
-
-# add positional encoding
-TASK='BEFORE' # Part 1 graded on BEFORE letter counting task
-
 # Wraps an example: stores the raw input string (input), the indexed form of the string (input_indexed),
 # a tensorized version of that (input_tensor), the raw outputs (output; a numpy array) and a tensorized version
 # of it (output_tensor).
@@ -40,7 +34,7 @@ class LetterCountingExample(object):
 # a single layer of the Transformer; this Module will take the raw words as input and do all of the steps necessary
 # to return distributions over the labels (0, 1, or 2) -> letter counting task.
 class Transformer(nn.Module):
-    def __init__(self, vocab_size, num_positions, d_model, d_internal, num_classes, num_layers):
+    def __init__(self, vocab_size, num_positions, d_model, d_internal, num_classes, num_layers, task):
         """
         :param vocab_size: vocabulary size of the embedding layer
         :param num_positions: max sequence length that will be fed to the model; should be 20
@@ -48,9 +42,11 @@ class Transformer(nn.Module):
         :param d_internal: see TransformerLayer
         :param num_classes: number of classes predicted at the output layer; should be 3
         :param num_layers: number of TransformerLayers to use; can be whatever you want
+        :param task: either 'BEFORE' or 'BEFOREAFTER' depending on which letter counting task is being performed. BEFORE will add positional encoding to char embeddings. BEFOREAFTER does NOT add positional encoding.
         """
         super().__init__()
-        #raise Exception("Implement me")
+        #raise Exception("Implement me")  
+        self.task = task      
         self.char_emb = nn.Embedding(vocab_size, d_model) # embedding layer for input chars
         self.pos_enc = PositionalEncoding(d_model, num_positions, batched=True)
         # make sure to create separate instances of TransformerLayer for each layer as each has its own weights that need to be updated
@@ -76,14 +72,15 @@ class Transformer(nn.Module):
         # add batch dimension if not present
         if indices.ndim == 1:
             indices = indices.unsqueeze(0) # (1, T) , T is seq_len
-            
-        # NOTE: for this letter counting taks, dont need to add start of sequence token (BOS)
+
+        # NOTE: this letter counting task doesnt need to add start of sequence token (BOS)
 
         attn_maps = []
 
         # embedding layer
         embedded = self.char_emb(indices)
-        if TASK == 'BEFORE':
+        # print(self.task)
+        if self.task == 'BEFORE':
             # add positional encodings to char embeddings
             pos_encoded = self.pos_enc(embedded) 
         else:
@@ -104,6 +101,9 @@ class Transformer(nn.Module):
         logits = self.output_layer(x) # (B, T, num_classes) -> (batch size, seq len, num classes)
         log_probs = self.log_softmax(logits)
 
+        # batch size 1, remove batch dim in return -> bc decode method assumes no batching and has hard coded how it handles the output (cannot modify decode method)
+        if indices.shape[0] == 1:
+            return log_probs.squeeze(0), attn_maps
         return log_probs, attn_maps
 
 # Your implementation of the Transformer layer goes here. It should take vectors and return the same number of vectors
@@ -164,6 +164,7 @@ class TransformerLayer(nn.Module):
         # NOTE: use matmul bc we have batch dimension (dot prod of 3D tensors)
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_k) # (B, T, T)
         
+        # Before thought had to use causal mask for BEFORE task but actually does not
         # if TASK == 'BEFORE':
         #     # causal mask to prevent attention to future positions
         #     T = Q.shape[1] # seq_len
@@ -209,7 +210,6 @@ class PositionalEncoding(nn.Module):
         self.batched = batched       
         nn.init.xavier_uniform_(self.emb.weight) # initialize positional embedding weights
 
-
     # call this class to add positional encodings to the char embeddings (x is the char embeddings)
     def forward(self, x):
         """
@@ -234,11 +234,13 @@ def train_classifier(args, train, dev):
     # and num_positions=20 bc training and testing data samples already formatted to be length 20 sequences
     # d_internal should be > d_model as d_internal corresponds to dim_feedforward
     # 3-class classification task (with labels 0, 1, or > 2 which we’ll just denote as 2) -> num_classes=3
-    model = Transformer(vocab_size=27, num_positions=20, d_model=512, d_internal=2048, num_classes=3, num_layers=2)
+    #d_model=512
+    #d_internal=2048
+    model = Transformer(vocab_size=27, num_positions=20, d_model=128, d_internal=256, num_classes=3, num_layers=2, task=args.task)
     model.zero_grad()
     model.train()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    
+        
     # we can optionally choose to train in batches (look at assignment 2 for batching example)
 
     num_epochs = 10
@@ -278,10 +280,12 @@ def train_classifier(args, train, dev):
         loss_this_dev = 0.0
         for ex in dev:
             log_probs, _ = model(ex.input_tensor.unsqueeze(0)) # (1, T, num_classes)
-            log_probs_reshaped = log_probs.view(-1, 3) # (T, num_classes)
+            # no batching here so log_probs is (T, num_classes) after squeezing batch dim in forward
+            # log_probs_reshaped = log_probs.view(-1, 3) # (T, num_classes)
             ex_output_reshaped = ex.output_tensor.view(-1) # (T,)
             loss_fcn = nn.NLLLoss()
-            loss = loss_fcn(log_probs_reshaped, ex_output_reshaped)
+            #loss = loss_fcn(log_probs_reshaped, ex_output_reshaped)
+            loss = loss_fcn(log_probs, ex_output_reshaped)
             loss_this_dev += loss.item()
         print("Dev loss %f" % loss_this_dev)
     return model
