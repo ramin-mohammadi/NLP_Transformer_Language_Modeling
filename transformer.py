@@ -33,8 +33,7 @@ class LetterCountingExample(object):
         self.input_indexed = np.array([vocab_index.index_of(ci) for ci in input]) 
         self.input_tensor = torch.LongTensor(self.input_indexed)
         self.output = output
-        self.output_tensor = torch.LongTensor(self.output)
-        
+        self.output_tensor = torch.LongTensor(self.output)        
 
 
 # Should contain your overall Transformer implementation. You will want to use Transformer layer to implement
@@ -178,6 +177,7 @@ class TransformerLayer(nn.Module):
           
         attn_map = torch.softmax(scores, dim=-1) # (B, T, T)
         attn_output = torch.matmul(attn_map, V) # (B, T, d_v)
+        # Possibly have a linear layer here but may only be if doing multi-head attention, here doing single-head attention so skip
         # add & norm
         attn_output = attn_output + input_vecs # residual connection
         attn_output = self.layer_norm_attn(attn_output)
@@ -230,11 +230,11 @@ class PositionalEncoding(nn.Module):
 
 # This is a skeleton for train_classifier: you can implement this however you want
 def train_classifier(args, train, dev):
-    raise Exception("Not fully implemented yet")
-
-    # The following code DOES NOT WORK but can be a starting point for your implementation
-    # Some suggested snippets to use:
-    model = Transformer(...)
+    # can hardcode vocab_size bc know before hand that only lowercase letters and space (26+1) are present in data
+    # and num_positions=20 bc training and testing data samples already formatted to be length 20 sequences
+    # d_internal should be > d_model as d_internal corresponds to dim_feedforward
+    # 3-class classification task (with labels 0, 1, or > 2 which we’ll just denote as 2) -> num_classes=3
+    model = Transformer(vocab_size=27, num_positions=20, d_model=512, d_internal=2048, num_classes=3, num_layers=2)
     model.zero_grad()
     model.train()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
@@ -248,14 +248,42 @@ def train_classifier(args, train, dev):
         # You can use batching if you'd like
         ex_idxs = [i for i in range(0, len(train))]
         random.shuffle(ex_idxs)
-        loss_fcn = nn.NLLLoss()
-        for ex_idx in ex_idxs:
-            loss = loss_fcn(...) # TODO: Run forward and compute loss
-            # model.zero_grad()
-            # loss.backward()
-            # optimizer.step()
+        # Batching
+        batch_size = 32 # training set has 10k samples, test set has 1k samples
+        batches = [ex_idxs[i:i + batch_size] for i in range(0, len(ex_idxs), batch_size)]
+        for batch in batches:
+            optimizer.zero_grad()
+            batch_inputs = torch.stack([train[i].input_tensor for i in batch]) # (B, T)
+            batch_targets = torch.stack([train[i].output_tensor for i in batch]) # (B, T)
+            log_probs, _ = model(batch_inputs) # (B, T, num_classes)
+            log_probs_reshaped = log_probs.view(-1, 3) # (B*T, num_classes)
+            batch_targets_reshaped = batch_targets.view(-1) # (B*T,)
+            loss_fcn = nn.NLLLoss()
+            loss = loss_fcn(log_probs_reshaped, batch_targets_reshaped)
+            loss.backward()
+            optimizer.step()
             loss_this_epoch += loss.item()
+        print("Epoch %i loss %f" % (t, loss_this_epoch))
+        # loss_fcn = nn.NLLLoss()
+        # for ex_idx in ex_idxs:
+        #     loss = loss_fcn(...) # TODO: Run forward and compute loss
+        #     # model.zero_grad()
+        #     # loss.backward()
+        #     # optimizer.step()
+        #     loss_this_epoch += loss.item()
+        
+    # testing    
     model.eval()
+    with torch.no_grad():
+        loss_this_dev = 0.0
+        for ex in dev:
+            log_probs, _ = model(ex.input_tensor.unsqueeze(0)) # (1, T, num_classes)
+            log_probs_reshaped = log_probs.view(-1, 3) # (T, num_classes)
+            ex_output_reshaped = ex.output_tensor.view(-1) # (T,)
+            loss_fcn = nn.NLLLoss()
+            loss = loss_fcn(log_probs_reshaped, ex_output_reshaped)
+            loss_this_dev += loss.item()
+        print("Dev loss %f" % loss_this_dev)
     return model
 
 
