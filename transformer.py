@@ -10,6 +10,11 @@ import matplotlib.pyplot as plt
 from typing import List
 from utils import *
 
+# dont use positional encoding
+# TASK='BEFOREAFTER'
+
+# add positional encoding
+TASK='BEFORE' # Part 1 graded on BEFORE letter counting task
 
 # Wraps an example: stores the raw input string (input), the indexed form of the string (input_indexed),
 # a tensorized version of that (input_tensor), the raw outputs (output; a numpy array) and a tensorized version
@@ -79,7 +84,12 @@ class Transformer(nn.Module):
 
         # embedding layer
         embedded = self.char_emb(indices)
-        pos_encoded = self.pos_enc(embedded) # add positional encodings to char embeddings
+        if TASK == 'BEFORE':
+            # add positional encodings to char embeddings
+            pos_encoded = self.pos_enc(embedded) 
+        else:
+            # no positional encoding for BEFOREAFTER task
+            pos_encoded = embedded 
         x = pos_encoded
 
         for layer in self.transformer_layers:
@@ -113,7 +123,6 @@ class TransformerLayer(nn.Module):
         # BEFORE-AFTER counting task requires looking at previous locations and future locations, so first implement bidirectional attention (no mask)
         # BEFORE counting task requires looking at only previous locations, so implement causal mask (mask out future locations)
         # we're graded on before task so will need to implement causal mask but can implement bidirectional first to get things working
-        self.MASK = True # set to True for causal mask (before task), False for bidirectional (before-after task)
                 
         """
         lecture 5.0.0 for architecture reference
@@ -155,16 +164,18 @@ class TransformerLayer(nn.Module):
         # single-head attention
         # NOTE: use matmul bc we have batch dimension (dot prod of 3D tensors)
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_k) # (B, T, T)
-        if self.MASK:
-            # causal mask to prevent attention to future positions
-            T = Q.shape[1] # seq_len
-            mask = torch.triu(torch.ones(T, T), diagonal=1).bool() # upper triangular matrix with 1s above diagonal
-            """
-            masked_fill(mask, value) returns a tensor where, for every position where mask is True, the corresponding element in the input tensor is replaced by value.
-            mask must be boolean (torch.bool)
-            unsqueeze(0) to make mask (1, T, T) so it broadcasts across batch dimension
-            """
-            scores = scores.masked_fill(mask.unsqueeze(0), float('-inf')) # (B, T, T) mask out future positions     
+        
+        # if TASK == 'BEFORE':
+        #     # causal mask to prevent attention to future positions
+        #     T = Q.shape[1] # seq_len
+        #     mask = torch.triu(torch.ones(T, T), diagonal=1).bool() # upper triangular matrix with 1s above diagonal
+        #     """
+        #     masked_fill(mask, value) returns a tensor where, for every position where mask is True, the corresponding element in the input tensor is replaced by value.
+        #     mask must be boolean (torch.bool)
+        #     unsqueeze(0) to make mask (1, T, T) so it broadcasts across batch dimension
+        #     """
+        #     scores = scores.masked_fill(mask.unsqueeze(0), float('-inf')) # (B, T, T) mask out future positions   
+          
         attn_map = torch.softmax(scores, dim=-1) # (B, T, T)
         attn_output = torch.matmul(attn_map, V) # (B, T, d_v)
         # add & norm
