@@ -46,20 +46,56 @@ class Transformer(nn.Module):
         :param num_layers: number of TransformerLayers to use; can be whatever you want
         """
         super().__init__()
-        raise Exception("Implement me")
+        #raise Exception("Implement me")
+        self.char_emb = nn.Embedding(vocab_size, d_model) # embedding layer for input chars
+        self.pos_enc = PositionalEncoding(d_model, num_positions, batched=True)
+        # make sure to create separate instances of TransformerLayer for each layer as each has its own weights that need to be updated
+        self.transformer_layers = nn.ModuleList([TransformerLayer(d_model, d_internal) for _ in range(num_layers)])
+        self.output_layer = nn.Linear(d_model, num_classes) # output layer to predict 0, 1, or 2
+        self.log_softmax = nn.LogSoftmax(dim=-1) # log softmax to get log probabilities over classes
+        nn.init.xavier_uniform_(self.char_emb.weight) # initialize embedding weights
+        nn.init.xavier_uniform_(self.output_layer.weight)
 
     def forward(self, indices):
         """
 
-        :param indices: list of input indices
+        :param indices: list of input indices (Torch Tensor)
         :return: A tuple of the softmax log probabilities (should be a 20x3 matrix) and a list of the attention
         maps you use in your layers (can be variable length, but each should be a 20x20 matrix)
         """
-        raise Exception("Implement me")
-        # NOTE the return as said above, see example return of this forward in decode method
+        # see example of handling return of this forward in decode method
         # attention map is result of Q dot K^T / sqrt(d_k) after softmax
         # list of attention maps, is the result from each transformer layer
+        # indices is the index of each char in the input sequence from our Indexer's vocab 
+        # (data training on is already fixed length so dont have to do any padding)
+        
+        # add batch dimension if not present
+        if indices.ndim == 1:
+            indices = indices.unsqueeze(0) # (1, T) , T is seq_len
+            
+        # NOTE: for this letter counting taks, dont need to add start of sequence token (BOS)
 
+        attn_maps = []
+
+        # embedding layer
+        embedded = self.char_emb(indices)
+        pos_encoded = self.pos_enc(embedded) # add positional encodings to char embeddings
+        x = pos_encoded
+
+        for layer in self.transformer_layers:
+            x, attn_map = layer(x)            
+            # attn_map are the attention maps from this layer transformer layer and for all samples in the batch (so shape (B, T, T))
+            # decode method is only part of code that uses and plots attention maps, but method does not call transformer with batching (batch size 1)
+            # and the plot imshow expects 2D array so need to remove batch dimension, when we know batch size is 1 (this is when decode calls forward)
+            if attn_map.shape[0] == 1: # batch size 1
+                attn_maps.append(attn_map.squeeze(0)) # remove batch dimension for plotting in decode
+            else:
+                attn_maps.append(attn_map) # keep batch dimension
+
+        logits = self.output_layer(x) # (B, T, num_classes) -> (batch size, seq len, num classes)
+        log_probs = self.log_softmax(logits)
+
+        return log_probs, attn_maps
 
 # Your implementation of the Transformer layer goes here. It should take vectors and return the same number of vectors
 # of the same length, applying self-attention, the feedforward layer, etc.
@@ -69,13 +105,80 @@ class TransformerLayer(nn.Module):
         :param d_model: The dimension of the inputs and outputs of the layer (note that the inputs and outputs
         have to be the same size for the residual connection to work)
         :param d_internal: The "internal" dimension used in the self-attention computation. Your keys and queries
-        should both be of this length.
+        should both be of this length. -> ignore, its up to us how to implement
         """
         super().__init__()
-        raise Exception("Implement me")
+        
+        # NOTE: 
+        # BEFORE-AFTER counting task requires looking at previous locations and future locations, so first implement bidirectional attention (no mask)
+        # BEFORE counting task requires looking at only previous locations, so implement causal mask (mask out future locations)
+        # we're graded on before task so will need to implement causal mask but can implement bidirectional first to get things working
+        self.MASK = True # set to True for causal mask (before task), False for bidirectional (before-after task)
+                
+        """
+        lecture 5.0.0 for architecture reference
+            - in multi head attention, you want query and key dim d_k and value dim d_v after their linear layers to be d_model / num_heads, but here num_heads = 1 so d_k = d_v = d_model
+            - HERE DOING SINGLE-HEAD ATTENTION
+            - d_internal refers to the linear in the FFN after attention (like dim_feedforward in torch nn.Transformer)
+            - when instantiating transformer, make sure d_internal > d_model
+        """
+        # self-attention
+        self.d_model = d_model # embedding dim
+        self.d_k = d_model # single head
+        self.d_v = d_model
+        self.linear_q = nn.Linear(d_model, self.d_k)
+        self.linear_k = nn.Linear(d_model, self.d_k)
+        self.linear_v = nn.Linear(d_model, self.d_v)
+        self.layer_norm_attn = nn.LayerNorm(d_model)
+        nn.init.xavier_uniform_(self.linear_q.weight)
+        nn.init.xavier_uniform_(self.linear_k.weight)
+        nn.init.xavier_uniform_(self.linear_v.weight)
+        # feedforward network       
+        self.d_internal = d_internal # FFN
+        self.linear1_FFN = nn.Linear(d_model, d_internal)
+        self.linear2_FFN = nn.Linear(d_internal, d_model)
+        self.relu_FFN = nn.ReLU()        
+        self.layer_norm_ffn = nn.LayerNorm(d_model)
+        nn.init.xavier_uniform_(self.linear1_FFN.weight)
+        nn.init.xavier_uniform_(self.linear2_FFN.weight)
+        
 
     def forward(self, input_vecs):
-        raise Exception("Implement me")
+        # input_vecs is [batch_dim, seq len, embedding dim] -> embeddings of each char in input sequence
+        # if no batch dim, add batch size of 1
+        if len(input_vecs.shape) == 2:
+            input_vecs = input_vecs.unsqueeze(0) # (1, T, d_model)
+            
+        Q = self.linear_q(input_vecs) # (B, T, d_k) -> B is batch_size, T is seq_len
+        K = self.linear_k(input_vecs) # (B, T, d_k)
+        V = self.linear_v(input_vecs) # (B, T, d_v)
+        # single-head attention
+        # NOTE: use matmul bc we have batch dimension (dot prod of 3D tensors)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.d_k) # (B, T, T)
+        if self.MASK:
+            # causal mask to prevent attention to future positions
+            T = Q.shape[1] # seq_len
+            mask = torch.triu(torch.ones(T, T), diagonal=1).bool() # upper triangular matrix with 1s above diagonal
+            """
+            masked_fill(mask, value) returns a tensor where, for every position where mask is True, the corresponding element in the input tensor is replaced by value.
+            mask must be boolean (torch.bool)
+            unsqueeze(0) to make mask (1, T, T) so it broadcasts across batch dimension
+            """
+            scores = scores.masked_fill(mask.unsqueeze(0), float('-inf')) # (B, T, T) mask out future positions     
+        attn_map = torch.softmax(scores, dim=-1) # (B, T, T)
+        attn_output = torch.matmul(attn_map, V) # (B, T, d_v)
+        # add & norm
+        attn_output = attn_output + input_vecs # residual connection
+        attn_output = self.layer_norm_attn(attn_output)
+        # feedforward network
+        ffn_output = self.linear1_FFN(attn_output) # (B, T, d_internal)
+        ffn_output = self.relu_FFN(ffn_output)
+        ffn_output = self.linear2_FFN(ffn_output) # (B, T, d_model)
+        # add & norm
+        ffn_output = ffn_output + attn_output # residual connection
+        ffn_output = self.layer_norm_ffn(ffn_output)
+        return (ffn_output, attn_map) # return (B, T, d_model) and (B, T, T) attention map for this layer
+    
 
 
 # Implementation of positional encoding that you can use in your network
@@ -92,7 +195,9 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         # Dict size
         self.emb = nn.Embedding(num_positions, d_model) # create embeddings for positions
-        self.batched = batched
+        self.batched = batched       
+        nn.init.xavier_uniform_(self.emb.weight) # initialize positional embedding weights
+
 
     # call this class to add positional encodings to the char embeddings (x is the char embeddings)
     def forward(self, x):
@@ -122,6 +227,8 @@ def train_classifier(args, train, dev):
     model.zero_grad()
     model.train()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    
+    # we can optionally choose to train in batches (look at assignment 2 for batching example)
 
     num_epochs = 10
     for t in range(0, num_epochs):
