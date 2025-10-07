@@ -60,10 +60,35 @@ class NeuralLanguageModel(LanguageModel):
         self.vocab_index = vocab_index
 
     def get_next_char_log_probs(self, context):
-        raise Exception("Implement me")
+        # make sure here to be in eval mode and detach from gpu (place back onto cpu) and convert to numpy array
+        self.model.eval()
+        device = next(self.model.parameters()).device
+        context_indices = [self.vocab_index.index_of(c) for c in context]
+        context_tensor = torch.tensor(context_indices, dtype=torch.long).to(device) # (seq_len,)
+        with torch.no_grad():
+            logits = self.model(context_tensor) # (1, seq_len, vocab_size)
+            last_logits = logits[0, -1, :] # (vocab_size,)
+            log_probs = torch.log_softmax(last_logits, dim=0) # (vocab_size,)
+        return log_probs.cpu().numpy()
 
     def get_log_prob_sequence(self, next_chars, context):
-        raise Exception("Implement me")
+        #raise Exception("Implement me")
+        self.model.eval()
+        device = next(self.model.parameters()).device
+        context_indices = [self.vocab_index.index_of(c) for c in context]
+        next_char_indices = [self.vocab_index.index_of(c) for c in next_chars]
+        all_indices = context_indices + next_char_indices
+        all_tensor = torch.tensor(all_indices, dtype=torch.long).to(device) # (context_len + next_len,)
+        with torch.no_grad():
+            logits = self.model(all_tensor) # (1, total_len, vocab_size)
+            log_probs = torch.log_softmax(logits, dim=-1) # (1, total_len, vocab_size)
+            # gather log probs of next_chars at their respective positions
+            total_log_prob = 0.0
+            for i in range(len(next_char_indices)):
+                pos = len(context_indices) + i
+                char_idx = next_char_indices[i]
+                total_log_prob += log_probs[0, pos, char_idx].item()
+        return total_log_prob
     
     
 class TransformerNextToken(torch.nn.Module):
@@ -108,7 +133,10 @@ class TransformerNextToken(torch.nn.Module):
         # add batch dimension if not present
         if len(indices.shape) == 1:
             indices = indices.unsqueeze(0) # (1, seq_len)
-            
+        
+        """
+        Below handles cases where input sequence length is not equal to model's expected seq_len (mainly for inferencing as training before calling forward will handle this)
+        """
         # if input sequence is longer than seq_len, truncate to last seq_len tokens
         if indices.shape[1] > self.seq_len:
             indices = indices[:, -self.seq_len:] # (batch_size, seq_len)
@@ -171,8 +199,10 @@ def train_lm(args, train_text, dev_text, vocab_index):
             batch_tensor = torch.tensor(batch_chunks, dtype=torch.long).to(device) # (batch_size, seq_len)
             logits = model(batch_tensor) # (batch_size, seq_len, vocab_size)
             # reshape to (batch_size * seq_len, vocab_size) and (batch_size * seq_len,) for cross entropy loss
-            logits = logits.reshape(-1, logits.shape[-1]) 
-            targets = batch_tensor.reshape(-1)
+            # condense batch dim for loss function
+            logits = logits.reshape(-1, logits.shape[-1]) # (batch_size * seq_len, vocab_size)
+            targets = batch_tensor.reshape(-1) # (batch_size * seq_len,) 
+            # Ground truth targets are the token index (from vocab) expected at each position
             loss = loss_fn(logits, targets, ignore_index=model.char_embedding.padding_idx)
             loss.backward()
             optimizer.step()
