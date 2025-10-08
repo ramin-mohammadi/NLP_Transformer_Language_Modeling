@@ -68,7 +68,7 @@ class NeuralLanguageModel(LanguageModel):
         with torch.no_grad():
             # print("Context tensor:", context_tensor)
             logits = self.model(context_tensor) # (1, seq_len, vocab_size)
-            last_logits = logits[0, -1, :] # (vocab_size,)
+            last_logits = logits[0, -1, :] # (vocab_size,) , acquire logits for last position
             log_probs = torch.log_softmax(last_logits, dim=0) # (vocab_size,)
         return log_probs.cpu().numpy()
 
@@ -90,6 +90,7 @@ class NeuralLanguageModel(LanguageModel):
             cur_context = cur_context + c
         return total_log_prob
     
+    
 import math 
 def get_positional_encoding(seq_len, d_model):
     position = torch.arange(seq_len).unsqueeze(1)
@@ -98,6 +99,7 @@ def get_positional_encoding(seq_len, d_model):
     pos_enc[:, 0::2] = torch.sin(position * div_term)
     pos_enc[:, 1::2] = torch.cos(position * div_term)
     return pos_enc
+
 
 class TransformerNextToken(torch.nn.Module):
     """
