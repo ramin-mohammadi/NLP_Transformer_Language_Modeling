@@ -103,7 +103,7 @@ class TransformerNextToken(torch.nn.Module):
     """
     Implement transformer using torch nn.TransformerEncoder and nn.TransformerEncoderLayer for next-token predicting task. Now given long continous sequence of characters and need to split into chunks of max length. Use causal mask and positional encoding from part 1.
     """
-    def __init__(self, vocab_size: int=27, d_model: int=512, nhead: int=8, num_layers: int=6, dim_feedforward: int=2048, seq_len: int=20, vocab_index: Indexer=None, pad_token: str='PAD'):
+    def __init__(self, vocab_size: int=27, d_model: int=512, nhead: int=8, num_layers: int=6, dim_feedforward: int=2048, seq_len: int=20, vocab_index: Indexer=None, pad_token: str='#'):
         """
         :param vocab_size: size of character vocabulary (27)
         :param d_model: embedding dimension (512)
@@ -115,19 +115,20 @@ class TransformerNextToken(torch.nn.Module):
         :param pad_token: the padding token string
         """
         super().__init__()        
-        # self.char_embedding = nn.Embedding(vocab_size, d_model, padding_idx=vocab_index.index_of(pad_token)) # last index is PAD token
+        self.char_embedding = nn.Embedding(vocab_size, d_model, padding_idx=vocab_index.index_of(pad_token)) # last index is PAD token
         
         # IMPORTANT: we want to add the padding token to our embedding but not our vocabulary Indexer
-        self.char_embedding = nn.Embedding(vocab_size+1, d_model, padding_idx=vocab_size) 
+        # self.char_embedding = nn.Embedding(vocab_size+1, d_model, padding_idx=vocab_size) 
         self.positional_encoding = PositionalEncoding(d_model, seq_len, batched=True)
         self.transformer_encoder = nn.TransformerEncoder(
             # important to set batch_first=True so input is (batch_dim, seq_len, embed_dim)
             # norm_first=True from deep learning course, showed to improve results
-            nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, norm_first=True, batch_first=True), 
+            nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, norm_first=False, batch_first=True), 
             num_layers
         )
         # map logits to vocab size for next token prediction
-        self.linear_out = nn.Linear(d_model, vocab_size+1) 
+        # self.linear_out = nn.Linear(d_model, vocab_size+1) 
+        self.linear_out = nn.Linear(d_model, vocab_size)
         self.seq_len = seq_len
         self.vocab_index = vocab_index
         nn.init.xavier_uniform_(self.char_embedding.weight)
@@ -216,7 +217,7 @@ def train_lm(args, train_text, dev_text, vocab_index):
     # add padding token to vocab
     pad_token = '#'
     
-    # vocab_index.add_and_get_index(pad_token) # DO NOT ADD PAD TOKEN TO VOCAB INDEXER, in lm.py, the normalization_test for get_log_prob_sequence relies on vocab_index being only the 27 characters, by adding PAD token, it till attempt to predict using the pad token and got unsolvable error
+    vocab_index.add_and_get_index(pad_token) # DO NOT ADD PAD TOKEN TO VOCAB INDEXER, in lm.py, the normalization_test for get_log_prob_sequence relies on vocab_index being only the 27 characters, by adding PAD token, it till attempt to predict using the pad token and got unsolvable error
     # perplexity 33
     
     # perplexity=31
