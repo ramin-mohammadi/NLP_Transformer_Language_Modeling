@@ -105,7 +105,7 @@ class TransformerNextToken(torch.nn.Module):
     """
     Implement transformer using torch nn.TransformerEncoder and nn.TransformerEncoderLayer for next-token predicting task. Now given long continous sequence of characters and need to split into chunks of max length. Use causal mask and positional encoding from part 1.
     """
-    def __init__(self, vocab_size: int=27, d_model: int=512, nhead: int=8, num_layers: int=6, dim_feedforward: int=2048, seq_len: int=20, vocab_index: Indexer=None, pad_token: str='#'):
+    def __init__(self, vocab_size: int=27, d_model: int=512, nhead: int=8, num_layers: int=6, dim_feedforward: int=2048, seq_len: int=20, vocab_index: Indexer=None, pad_token: str='#', BOS_token: str=' '):
         """
         :param vocab_size: size of character vocabulary (27)
         :param d_model: embedding dimension (512)
@@ -138,6 +138,7 @@ class TransformerNextToken(torch.nn.Module):
         with torch.no_grad():
             self.char_embedding.weight[self.char_embedding.padding_idx].zero_()
         nn.init.xavier_uniform_(self.linear_out.weight)
+        self.BOS_token = BOS_token
 
     def forward(self, indices):
         """
@@ -155,7 +156,7 @@ class TransformerNextToken(torch.nn.Module):
         if indices.shape[1] > self.seq_len:
             indices = indices[:, -self.seq_len:] # (batch_size, seq_len)
         if indices.shape[1] < self.seq_len:
-            # pad with PAD token index at the beginning if sequence is shorter than seq_len
+            # pad at the beginning if sequence is shorter than seq_len
             pad_length = self.seq_len - indices.shape[1]
             pad_idx = self.char_embedding.padding_idx
             pad_tensor = torch.full((indices.shape[0], pad_length), pad_idx, dtype=torch.long, device=indices.device) # (batch_size, pad_length)
@@ -168,7 +169,8 @@ class TransformerNextToken(torch.nn.Module):
         # print("\n\nAFTER SHIFT INDICES:", indices)
         
         # replace first position with BOS token (here is ' ' space) to each sequence in batch
-        space_idx = self.vocab_index.index_of(' ')
+        #space_idx = self.vocab_index.index_of(' ')
+        space_idx = self.vocab_index.index_of(self.BOS_token)
         indices[:, 0] = space_idx
         # print("\n\nAFTER INSERT BOS INDICES:", indices)
         # NOTE: we do above shifting and BOS token insertion before embedding bc the BOS token is part of the vocab and has a learned embedding
@@ -218,37 +220,36 @@ def train_lm(args, train_text, dev_text, vocab_index):
     """
     # add padding token to vocab
     pad_token = '#'
+    vocab_index.add_and_get_index(pad_token) # DO NOT ADD a pad token that is multiple chars like 'PAD' TO VOCAB INDEXER, in lm.py, the normalization_test for get_log_prob_sequence loops through our vocab is nextchars and will break if we have multi-char token
     
-    vocab_index.add_and_get_index(pad_token) # DO NOT ADD PAD TOKEN TO VOCAB INDEXER, in lm.py, the normalization_test for get_log_prob_sequence relies on vocab_index being only the 27 characters, by adding PAD token, it till attempt to predict using the pad token and got unsolvable error
-    # perplexity 33
+    BOS_token = '@'
+    vocab_index.add_and_get_index(BOS_token)
     
-    # perplexity=31
-    # seq_len = 100
+    seq_len=50
+    nhead=2
+    dim_feedforward=64
+    d_model=32
+    num_layers=2
+    # seq_len=50
     # nhead=4
     # dim_feedforward=512
     # d_model=256
-    # num_layers=4
-    
-    seq_len = 20
-    nhead=8
-    dim_feedforward=2048
-    d_model=512
-    num_layers=6
+    # num_layers=3
     
     model = TransformerNextToken(nhead=nhead, dim_feedforward=dim_feedforward,
-                                 d_model=d_model, num_layers=num_layers, vocab_size=len(vocab_index), vocab_index=vocab_index, pad_token=pad_token, seq_len=seq_len)
+                                 d_model=d_model, num_layers=num_layers, vocab_size=len(vocab_index), vocab_index=vocab_index, pad_token=pad_token, seq_len=seq_len, BOS_token=BOS_token)
     model.zero_grad()
     model.train()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
     loss_fn = nn.CrossEntropyLoss(ignore_index=model.char_embedding.padding_idx) # applies softmax internally
     
     
     train_indices = text_to_indices(train_text, vocab_index)
     train_chunks = chunk_non_overlapping(train_indices, seq_len=model.seq_len, drop_last=True, random_offset=False)
     
-    num_epochs = 10
+    num_epochs = 5
     batch_size = 32
     for epoch in range(0, num_epochs):
         print("Starting epoch %i" % (epoch))
