@@ -112,7 +112,7 @@ class TransformerNextToken(torch.nn.Module):
         :param dim_feedforward: dimension of feedforward layer (2048)
         :param seq_len: maximum sequence length (20)
         :param vocab_index: an Indexer of the character vocabulary (27 characters)
-        :param pad_token: the padding token string (PAD)
+        :param pad_token: the padding token string
         """
         super().__init__()        
         # self.char_embedding = nn.Embedding(vocab_size, d_model, padding_idx=vocab_index.index_of(pad_token)) # last index is PAD token
@@ -179,6 +179,31 @@ class TransformerNextToken(torch.nn.Module):
         x = self.linear_out(x) # (batch_size, seq_len, vocab_size)
         return x
 
+def text_to_indices(text: str, vocab_index) -> List[int]:
+    """Convert string to list of token indices using vocab_index.index_of(c)."""
+    return [vocab_index.index_of(c) for c in text]
+
+def chunk_non_overlapping(indices: List[int], seq_len: int,
+                          drop_last: bool = True,
+                          random_offset: bool = False) -> List[List[int]]:
+    """
+    Partition indices into non-overlapping chunks of length seq_len.
+    If random_offset is True pick a start in [0, seq_len-1] each call (useful per-epoch).
+    If drop_last is False, the final short chunk is left-padded (requires pad_idx provided externally).
+    Returns list of chunks (each length <= seq_len). If you want guaranteed length seq_len,
+    either drop_last=True or post-pad/pad-left externally.
+    """
+    if random_offset:
+        start = random.randint(0, seq_len - 1)
+    else:
+        start = 0
+    chunks = []
+    for i in range(start, len(indices), seq_len):
+        chunk = indices[i:i+seq_len]
+        if len(chunk) < seq_len and drop_last:
+            break
+        chunks.append(chunk)
+    return chunks
 
 def train_lm(args, train_text, dev_text, vocab_index):
     """
@@ -189,7 +214,7 @@ def train_lm(args, train_text, dev_text, vocab_index):
     :return: a NeuralLanguageModel instance trained on the given data
     """
     # add padding token to vocab
-    pad_token = 'PAD'
+    pad_token = '#'
     
     # vocab_index.add_and_get_index(pad_token) # DO NOT ADD PAD TOKEN TO VOCAB INDEXER, in lm.py, the normalization_test for get_log_prob_sequence relies on vocab_index being only the 27 characters, by adding PAD token, it till attempt to predict using the pad token and got unsolvable error
     # perplexity 33
@@ -216,24 +241,27 @@ def train_lm(args, train_text, dev_text, vocab_index):
     optimizer = optim.Adam(model.parameters(), lr=0.0001)
     loss_fn = nn.CrossEntropyLoss(ignore_index=model.char_embedding.padding_idx) # applies softmax internally
     
+    
+    train_indices = text_to_indices(train_text, vocab_index)
+    train_chunks = chunk_non_overlapping(train_indices, seq_len=model.seq_len, drop_last=True, random_offset=False)
+    
     num_epochs = 10
-    batch_size = 512
+    batch_size = 32
     for epoch in range(0, num_epochs):
         print("Starting epoch %i" % (epoch))
         loss_this_epoch = 0.0
         #random_start = random.randint(0, model.seq_len - 1) # to get different chunks each epoch
         # chunk train text into sequences of length seq_len
-        train_indices = [vocab_index.index_of(c) for c in train_text]
+        # train_indices = [vocab_index.index_of(c) for c in train_text]
         #train_chunks = [train_indices[i:i+model.seq_len] for i in range(random_start, len(train_indices)-model.seq_len, model.seq_len)]
-        train_chunks = [train_indices[i:i+model.seq_len] for i in range(0, len(train_indices), model.seq_len)]
-        random.shuffle(train_chunks) # shuffle chunks each epoch
-        # mini-batch training
+        # train_chunks = [train_indices[i:i+model.seq_len] for i in range(0, len(train_indices), model.seq_len)        
+       
+        random.shuffle(train_chunks)
         for b in range(0, len(train_chunks), batch_size):
             batch_chunks = train_chunks[b:b+batch_size]
-            batch_tensor = torch.tensor(batch_chunks, dtype=torch.long).to(device) # (batch_size, seq_len)
+            batch_tensor = torch.tensor(np.array(batch_chunks), dtype=torch.long).to(device) # (batch_size, seq_len)
             logits = model(batch_tensor) # (batch_size, seq_len, vocab_size)
-            # reshape to (batch_size * seq_len, vocab_size) and (batch_size * seq_len,) for cross entropy loss
-            # condense batch dim for loss function
+            # Collapse batch dim for cross entropy loss funct
             logits = logits.reshape(-1, logits.shape[-1]) # (batch_size * seq_len, vocab_size)
             targets = batch_tensor.reshape(-1) # (batch_size * seq_len,) 
             # Ground truth targets are the token index (from vocab) expected at each position
@@ -248,19 +276,19 @@ def train_lm(args, train_text, dev_text, vocab_index):
         print("Epoch %i training loss: %f" % (epoch, loss_this_epoch))
         
     # testing    
-    model.eval() # also model.eval() to determinize inference (turns off dropout layers in TransformerEncoder)
-    with torch.no_grad():
-        loss_this_dev = 0.0
-        # chunk dev text into sequences of length seq_len
-        dev_indices = [vocab_index.add_and_get_index(c) for c in dev_text]
-        dev_chunks = [dev_indices[i:i+model.seq_len] for i in range(0, len(dev_indices)-model.seq_len, model.seq_len)]
-        for b in range(0, len(dev_chunks), batch_size):
-            batch_chunks = dev_chunks[b:b+batch_size]
-            batch_tensor = torch.tensor(batch_chunks, dtype=torch.long).to(device) # (batch_size, seq_len)
-            logits = model(batch_tensor) # (batch_size, seq_len, vocab_size)
-            logits = logits.reshape(-1, logits.shape[-1]) 
-            targets = batch_tensor.reshape(-1)
-            loss = loss_fn(logits, targets)
-            loss_this_dev += loss.item()
-        print("Epoch %i dev loss: %f" % (epoch, loss_this_dev))
+    model.eval() 
+    # with torch.no_grad():
+    #     loss_this_dev = 0.0
+    #     # chunk dev text into sequences of length seq_len
+    #     dev_indices = [vocab_index.add_and_get_index(c) for c in dev_text]
+    #     dev_chunks = [dev_indices[i:i+model.seq_len] for i in range(0, len(dev_indices)-model.seq_len, model.seq_len)]
+    #     for b in range(0, len(dev_chunks), batch_size):
+    #         batch_chunks = dev_chunks[b:b+batch_size]
+    #         batch_tensor = torch.tensor(batch_chunks, dtype=torch.long).to(device) # (batch_size, seq_len)
+    #         logits = model(batch_tensor) # (batch_size, seq_len, vocab_size)
+    #         logits = logits.reshape(-1, logits.shape[-1]) 
+    #         targets = batch_tensor.reshape(-1)
+    #         loss = loss_fn(logits, targets)
+    #         loss_this_dev += loss.item()
+    #     print("Epoch %i dev loss: %f" % (epoch, loss_this_dev))
     return NeuralLanguageModel(model, vocab_index)
