@@ -218,7 +218,7 @@ class PositionalEncoding(nn.Module):
         """
         # Second-to-last dimension will always be sequence length
         input_size = x.shape[-2]
-        indices_to_embed = torch.tensor(np.asarray(range(0, input_size))).type(torch.LongTensor)
+        indices_to_embed = torch.tensor(np.asarray(range(0, input_size))).type(torch.LongTensor).to(x.device)
         if self.batched:
             # Use unsqueeze to form a [1, seq len, embedding dim] tensor -- broadcasting will ensure that this
             # gets added correctly across the batch

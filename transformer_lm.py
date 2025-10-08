@@ -66,31 +66,39 @@ class NeuralLanguageModel(LanguageModel):
         context_indices = [self.vocab_index.index_of(c) for c in context]
         context_tensor = torch.tensor(context_indices, dtype=torch.long).to(device) # (seq_len,)
         with torch.no_grad():
+            # print("Context tensor:", context_tensor)
             logits = self.model(context_tensor) # (1, seq_len, vocab_size)
             last_logits = logits[0, -1, :] # (vocab_size,)
             log_probs = torch.log_softmax(last_logits, dim=0) # (vocab_size,)
         return log_probs.cpu().numpy()
 
     def get_log_prob_sequence(self, next_chars, context):
-        #raise Exception("Implement me")
+        # Compute log P(next_chars | context) sequentially by querying one-step
+        # next-character probabilities. This avoids issues with truncation when
+        # the combined length exceeds the model's seq_len and ensures consistency
+        # with get_next_char_log_probs.
         self.model.eval()
-        device = next(self.model.parameters()).device
-        context_indices = [self.vocab_index.index_of(c) for c in context]
-        next_char_indices = [self.vocab_index.index_of(c) for c in next_chars]
-        all_indices = context_indices + next_char_indices
-        all_tensor = torch.tensor(all_indices, dtype=torch.long).to(device) # (context_len + next_len,)
-        with torch.no_grad():
-            logits = self.model(all_tensor) # (1, total_len, vocab_size)
-            log_probs = torch.log_softmax(logits, dim=-1) # (1, total_len, vocab_size)
-            # gather log probs of next_chars at their respective positions
-            total_log_prob = 0.0
-            for i in range(len(next_char_indices)):
-                pos = len(context_indices) + i
-                char_idx = next_char_indices[i]
-                total_log_prob += log_probs[0, pos, char_idx].item()
+        total_log_prob = 0.0
+        cur_context = context
+        # if next_chars is a string, 
+        for c in next_chars:
+            # print("Current c: ", c)
+            # print("Current context: ", cur_context)
+            logp = self.get_next_char_log_probs(cur_context)  # numpy array of log-probs
+            char_idx = self.vocab_index.index_of(c)
+            total_log_prob += float(logp[char_idx])
+            cur_context = cur_context + c
         return total_log_prob
     
-    
+import math 
+def get_positional_encoding(seq_len, d_model):
+    position = torch.arange(seq_len).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
+    pos_enc = torch.zeros(seq_len, d_model)
+    pos_enc[:, 0::2] = torch.sin(position * div_term)
+    pos_enc[:, 1::2] = torch.cos(position * div_term)
+    return pos_enc
+
 class TransformerNextToken(torch.nn.Module):
     """
     Implement transformer using torch nn.TransformerEncoder and nn.TransformerEncoderLayer for next-token predicting task. Now given long continous sequence of characters and need to split into chunks of max length. Use causal mask and positional encoding from part 1.
@@ -107,7 +115,10 @@ class TransformerNextToken(torch.nn.Module):
         :param pad_token: the padding token string (PAD)
         """
         super().__init__()        
-        self.char_embedding = nn.Embedding(vocab_size, d_model, padding_idx=vocab_index.index_of(pad_token)) # last index is PAD token
+        # self.char_embedding = nn.Embedding(vocab_size, d_model, padding_idx=vocab_index.index_of(pad_token)) # last index is PAD token
+        
+        # IMPORTANT: we want to add the padding token to our embedding but not our vocabulary Indexer
+        self.char_embedding = nn.Embedding(vocab_size+1, d_model, padding_idx=vocab_size) 
         self.positional_encoding = PositionalEncoding(d_model, seq_len, batched=True)
         self.transformer_encoder = nn.TransformerEncoder(
             # important to set batch_first=True so input is (batch_dim, seq_len, embed_dim)
@@ -116,7 +127,7 @@ class TransformerNextToken(torch.nn.Module):
             num_layers
         )
         # map logits to vocab size for next token prediction
-        self.linear_out = nn.Linear(d_model, vocab_size) 
+        self.linear_out = nn.Linear(d_model, vocab_size+1) 
         self.seq_len = seq_len
         self.vocab_index = vocab_index
         nn.init.xavier_uniform_(self.char_embedding.weight)
@@ -146,16 +157,23 @@ class TransformerNextToken(torch.nn.Module):
             pad_idx = self.char_embedding.padding_idx
             pad_tensor = torch.full((indices.shape[0], pad_length), pad_idx, dtype=torch.long, device=indices.device) # (batch_size, pad_length)
             indices = torch.cat([pad_tensor, indices], dim=1) # (batch_size, seq_len)
-            
+            # print("\n\nPADDED INDICES:", indices)
+        
+        # print("\n\nBEFORE SHIFT INDICES:", indices)
         # shift tokens right by 1 position for next token prediction
-        indices = torch.roll(indices, shifts=1, dims=1)
+        indices = torch.roll(indices, shifts=1, dims=1) 
+        # print("\n\nAFTER SHIFT INDICES:", indices)
         
         # replace first position with BOS token (here is ' ' space) to each sequence in batch
         space_idx = self.vocab_index.index_of(' ')
         indices[:, 0] = space_idx
+        # print("\n\nAFTER INSERT BOS INDICES:", indices)
         # NOTE: we do above shifting and BOS token insertion before embedding bc the BOS token is part of the vocab and has a learned embedding
         x = self.char_embedding(indices)
+        # print("\n\nCHAR EMBEDDING OUTPUT:", x)
+        # print(x.shape)
         x = self.positional_encoding(x) # adds positional encoding to char embeddings
+        #x = x + get_positional_encoding(self.seq_len, x.shape[-1]).to(x.device) 
         mask=torch.nn.Transformer.generate_square_subsequent_mask(sz=self.seq_len).to(x.device) # (seq_len, seq_len) causal mask
         x = self.transformer_encoder(x, mask=mask, is_causal=True) # (batch_size, seq_len, d_model)
         x = self.linear_out(x) # (batch_size, seq_len, vocab_size)
@@ -172,26 +190,42 @@ def train_lm(args, train_text, dev_text, vocab_index):
     """
     # add padding token to vocab
     pad_token = 'PAD'
-    seq_len = 20
-    vocab_index.add_and_get_index(pad_token)
     
-    model = TransformerNextToken(vocab_size=len(vocab_index), vocab_index=vocab_index, pad_token=pad_token, seq_len=seq_len)
+    # vocab_index.add_and_get_index(pad_token) # DO NOT ADD PAD TOKEN TO VOCAB INDEXER, in lm.py, the normalization_test for get_log_prob_sequence relies on vocab_index being only the 27 characters, by adding PAD token, it till attempt to predict using the pad token and got unsolvable error
+    # perplexity 33
+    
+    # perplexity=31
+    # seq_len = 100
+    # nhead=4
+    # dim_feedforward=512
+    # d_model=256
+    # num_layers=4
+    
+    seq_len = 20
+    nhead=8
+    dim_feedforward=2048
+    d_model=512
+    num_layers=6
+    
+    model = TransformerNextToken(nhead=nhead, dim_feedforward=dim_feedforward,
+                                 d_model=d_model, num_layers=num_layers, vocab_size=len(vocab_index), vocab_index=vocab_index, pad_token=pad_token, seq_len=seq_len)
     model.zero_grad()
     model.train()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.0001)
-    loss_fn = nn.CrossEntropyLoss() # applies softmax internally
+    loss_fn = nn.CrossEntropyLoss(ignore_index=model.char_embedding.padding_idx) # applies softmax internally
     
     num_epochs = 10
-    batch_size = 64
+    batch_size = 512
     for epoch in range(0, num_epochs):
         print("Starting epoch %i" % (epoch))
         loss_this_epoch = 0.0
-        random_start = random.randint(0, model.seq_len - 1) # to get different chunks each epoch
+        #random_start = random.randint(0, model.seq_len - 1) # to get different chunks each epoch
         # chunk train text into sequences of length seq_len
-        train_indices = [vocab_index.add_and_get_index(c) for c in train_text]
-        train_chunks = [train_indices[i:i+model.seq_len] for i in range(random_start, len(train_indices)-model.seq_len, model.seq_len)]
+        train_indices = [vocab_index.index_of(c) for c in train_text]
+        #train_chunks = [train_indices[i:i+model.seq_len] for i in range(random_start, len(train_indices)-model.seq_len, model.seq_len)]
+        train_chunks = [train_indices[i:i+model.seq_len] for i in range(0, len(train_indices), model.seq_len)]
         random.shuffle(train_chunks) # shuffle chunks each epoch
         # mini-batch training
         for b in range(0, len(train_chunks), batch_size):
@@ -203,7 +237,10 @@ def train_lm(args, train_text, dev_text, vocab_index):
             logits = logits.reshape(-1, logits.shape[-1]) # (batch_size * seq_len, vocab_size)
             targets = batch_tensor.reshape(-1) # (batch_size * seq_len,) 
             # Ground truth targets are the token index (from vocab) expected at each position
-            loss = loss_fn(logits, targets, ignore_index=model.char_embedding.padding_idx)
+            # print("\nLOSS LOGITS argmax:", nn.functional.softmax(logits, dim=-1).argmax(dim=-1))
+            # print("\nLOSS TARGETS:", targets)
+
+            loss = loss_fn(logits, targets)
             loss.backward()
             optimizer.step()
             model.zero_grad()
@@ -223,7 +260,7 @@ def train_lm(args, train_text, dev_text, vocab_index):
             logits = model(batch_tensor) # (batch_size, seq_len, vocab_size)
             logits = logits.reshape(-1, logits.shape[-1]) 
             targets = batch_tensor.reshape(-1)
-            loss = loss_fn(logits, targets, ignore_index=model.char_embedding.padding_idx)
+            loss = loss_fn(logits, targets)
             loss_this_dev += loss.item()
         print("Epoch %i dev loss: %f" % (epoch, loss_this_dev))
     return NeuralLanguageModel(model, vocab_index)
