@@ -134,31 +134,38 @@ class TransformerNextToken(torch.nn.Module):
         :param vocab_index: an Indexer of the character vocabulary (27 characters)
         :param pad_token: the padding token string
         """
-        super().__init__()        
+        super().__init__()   
+        self.seq_len = seq_len
+        self.vocab_index = vocab_index
+        self.BOS_token = BOS_token      
         # self.char_embedding = nn.Embedding(vocab_size, d_model, padding_idx=vocab_index.index_of(pad_token)) # last index is PAD token
         self.char_embedding = nn.Embedding(vocab_size, d_model)
 
         # IMPORTANT: we want to add the padding token to our embedding but not our vocabulary Indexer
         # self.char_embedding = nn.Embedding(vocab_size+1, d_model, padding_idx=vocab_size) 
         self.positional_encoding = PositionalEncoding(d_model, seq_len, batched=True)
+        dropout=0.1
+        # add dropout for regularization (better generalization)
+        self.embedding_dropout = nn.Dropout(p=dropout)
         self.transformer_encoder = nn.TransformerEncoder(
             # important to set batch_first=True so input is (batch_dim, seq_len, embed_dim)
             # norm_first=True from deep learning course, showed to improve results
-            nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, norm_first=False, batch_first=True), 
+            nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, norm_first=False, batch_first=True, dropout=dropout), 
             num_layers
         )
-        # map logits to vocab size for next token prediction
-        # self.linear_out = nn.Linear(d_model, vocab_size+1) 
         self.linear_out = nn.Linear(d_model, vocab_size)
-        self.seq_len = seq_len
-        self.vocab_index = vocab_index
-        # nn.init.xavier_uniform_(self.char_embedding.weight)
+       
+        #nn.init.xavier_uniform_(self.char_embedding.weight)
+        nn.init.normal_(self.char_embedding.weight, mean=0.0, std=0.02)
+        self.linear_out.weight = self.char_embedding.weight
+        nn.init.zeros_(self.linear_out.bias)
+        
+        self.log_softmax = nn.LogSoftmax(dim=-1) # for NLLLoss
         # # # ensure padding token weights is zero after intialization to prevent it from being updated during training
         # # # with torch.no_grad():
         # # #     self.char_embedding.weight[self.char_embedding.padding_idx].zero_()
-        # nn.init.xavier_uniform_(self.linear_out.weight)
-        self.BOS_token = BOS_token
-        self.log_softmax = nn.LogSoftmax(dim=-1) # for NLLLoss
+        #nn.init.xavier_uniform_(self.linear_out.weight)
+       
 
     def forward(self, indices: torch.Tensor):
         """
@@ -174,7 +181,11 @@ class TransformerNextToken(torch.nn.Module):
         """
         # if input sequence is longer than seq_len, truncate to last seq_len tokens
         if indices.shape[1] > self.seq_len:
+            # print("BEFORE TRUNCATE:", indices.shape)
             indices = indices[:, -self.seq_len:] # (batch_size, seq_len)
+            # print("AFTER TRUNCATE:", indices.shape)
+        
+        # NO LONGER NEED TO PAD BC Using dynamic masking (mask is size of input sequence length)
         # if indices.shape[1] < self.seq_len:
         #     # pad at the beginning if sequence is shorter than seq_len
         #     pad_length = self.seq_len - indices.shape[1]
@@ -202,8 +213,13 @@ class TransformerNextToken(torch.nn.Module):
         #print(x.shape)
         
         
+        
+        
         x = self.positional_encoding(x) # adds positional encoding to char embeddings
         #x = x + get_positional_encoding(self.seq_len, x.shape[-1]).to(x.device) 
+         
+         
+        x = self.embedding_dropout(x)
         
         # make mask dynamic so dont have to do padding , embedding layer simply adds embeddings for given indices, 
         # so no problem if input shorter than model seq_len. only layer seq_len matters is for PostiionalEncoding 
@@ -289,11 +305,19 @@ def train_lm(args, train_text, dev_text, vocab_index):
     # num_layers=2
     #stride=1
     
-    seq_len=20
-    nhead=4 # 4
-    d_model=32
+    seq_len=30
+    nhead=8
+    d_model=64
     dim_feedforward=d_model*4
     num_layers=2
+    
+    num_epochs = 10
+    batch_size = 128 # larger batch size for better generalization
+    
+    # DO NOT set striding to 1 or too low, will overfit and not generalize well (seeing too many of same samples basically since overlapping strongly)
+    stride = max(1, seq_len // 2)
+    #stride=1 # striding at extreme (every sample is just shifted by 1 (lots of overlapping))
+    #stride=seq_len # no overlap, basically no striding
     
     model = TransformerNextToken(nhead=nhead, dim_feedforward=dim_feedforward,
                                  d_model=d_model, num_layers=num_layers, vocab_size=len(vocab_index), vocab_index=vocab_index, pad_token=pad_token, seq_len=seq_len, BOS_token=BOS_token)
@@ -301,24 +325,19 @@ def train_lm(args, train_text, dev_text, vocab_index):
     model.train()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=3e-4) 
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2) 
     # simple scheduler: multiply LR by 0.9 every epoch
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=1) # no need for schedueler
+    #scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=1) # gamma is factor to multiply LR by
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-5)
     # loss_fn = nn.CrossEntropyLoss(ignore_index=model.char_embedding.padding_idx) # applies softmax internally
     # Use NLLLoss and pass log-probabilities into it
     loss_fn = nn.NLLLoss()
     
     train_indices = text_to_indices(train_text, vocab_index)
-    train_chunks = chunk_non_overlapping(train_indices, seq_len=model.seq_len, drop_last=True, random_offset=False)
-    # use overlapping sliding window chunks with half-overlap by default
-    #stride = max(1, model.seq_len // 2)
-    #stride=1 # striding at extreme (every sample is just shifted by 1 (lots of overlapping))
-    stride=model.seq_len # no overlap, basically no striding
+    # train_chunks = chunk_non_overlapping(train_indices, seq_len=model.seq_len, drop_last=True, random_offset=False)
     drop_short = True
-    #train_chunks = sliding_window_chunks(train_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short) # must drop short for batching to work (cant have a sample with different seq_len)
+    train_chunks = sliding_window_chunks(train_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short) # must drop short for batching to work (cant have a sample with different seq_len)
     
-    num_epochs = 4
-    batch_size = 64
     for epoch in range(0, num_epochs):
         cur_lr = optimizer.param_groups[0]['lr']
         print(f"Starting epoch {epoch} - lr={cur_lr:.6e}")
@@ -342,6 +361,8 @@ def train_lm(args, train_text, dev_text, vocab_index):
             # exit()
             loss = loss_fn(logits, targets)
             loss.backward()
+            # gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             model.zero_grad()
             
