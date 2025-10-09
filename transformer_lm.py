@@ -73,6 +73,7 @@ class NeuralLanguageModel(LanguageModel):
 
         with torch.no_grad():
             # print("Context tensor:", context_tensor)
+            context_tensor = self.model.preprocess_input(context_tensor, training=False) # (1, seq_len) , do not shift or add BOS token during inferencing so specify training=False
             logits = self.model(context_tensor) # (1, seq_len, vocab_size)
             #last_logits = logits[0, -1, :] # (vocab_size,) , acquire logits for last position
             #log_probs = torch.log_softmax(last_logits, dim=0) # (vocab_size,)
@@ -119,6 +120,7 @@ def get_positional_encoding(seq_len, d_model):
     return pos_enc
 
 
+
 class TransformerNextToken(torch.nn.Module):
     """
     Implement transformer using torch nn.TransformerEncoder and nn.TransformerEncoderLayer for next-token predicting task. Now given long continous sequence of characters and need to split into chunks of max length. Use causal mask and positional encoding from part 1.
@@ -146,7 +148,7 @@ class TransformerNextToken(torch.nn.Module):
         self.positional_encoding = PositionalEncoding(d_model, seq_len, batched=True)
         dropout=dropout
         # add dropout for regularization (better generalization)
-        self.embedding_dropout = nn.Dropout(p=dropout)
+        # self.embedding_dropout = nn.Dropout(p=dropout)
         self.transformer_encoder = nn.TransformerEncoder(
             # important to set batch_first=True so input is (batch_dim, seq_len, embed_dim)
             # norm_first=True from deep learning course, showed to improve results
@@ -155,58 +157,53 @@ class TransformerNextToken(torch.nn.Module):
         )
         self.linear_out = nn.Linear(d_model, vocab_size)
        
-        # nn.init.xavier_uniform_(self.char_embedding.weight)
-        # nn.init.xavier_uniform_(self.linear_out.weight)
-        nn.init.normal_(self.char_embedding.weight, mean=0.0, std=0.02)
-        self.linear_out.weight = self.char_embedding.weight
-        nn.init.zeros_(self.linear_out.bias)
+        nn.init.xavier_uniform_(self.char_embedding.weight)
+        nn.init.xavier_uniform_(self.linear_out.weight)
+        # nn.init.normal_(self.char_embedding.weight, mean=0.0, std=0.02)
+        # self.linear_out.weight = self.char_embedding.weight
+        # nn.init.zeros_(self.linear_out.bias)
+        
+        # initializations not significant
         
         self.log_softmax = nn.LogSoftmax(dim=-1) # for NLLLoss
         # # # ensure padding token weights is zero after intialization to prevent it from being updated during training
         # # # with torch.no_grad():
         # # #     self.char_embedding.weight[self.char_embedding.padding_idx].zero_()
-        #nn.init.xavier_uniform_(self.linear_out.weight)
-       
+    
+    def preprocess_input(self, indices: torch.Tensor, training: bool=False):
+        # add batch dimension if not present
+        if len(indices.shape) == 1:
+            indices = indices.unsqueeze(0) # (1, seq_len)
+        # if input sequence is longer than seq_len, truncate to last seq_len tokens
+        if indices.shape[1] > self.seq_len:
+            # print("BEFORE TRUNCATE:", indices.shape)
+            indices = indices[:, -self.seq_len:] # (batch_size, seq_len)
+            # print("AFTER TRUNCATE:", indices.shape)
+            
+        #  SHIFT TOKEN OVER 1 LOCATION AND ADD BOS TOKEN ONLY DURING TRAINING, NOT INFERENCING
+        # NO LONGER NEED TO PAD BC Using dynamic masking (mask is size of input sequence length)
+        if training:
+            # print("\n\nBEFORE SHIFT INDICES:", indices, indices.shape)
+            # shift tokens right by 1 position for next token prediction
+            indices = torch.roll(indices, shifts=1, dims=1) 
+            # print("\n\nAFTER SHIFT INDICES:", indices)
+            
+            # IMPORTANT NOTE:
+            # for training shift and add BOS
+            # for inferencing you do not shift nor add BOS
+            # handle preprocessing only in training loop
+            
+            # replace first position with BOS token (here is ' ' space) to each sequence in batch
+            indices[:, 0] = self.vocab_index.index_of(self.BOS_token)
+            # print("\n\nAFTER INSERT BOS INDICES:", indices, indices.shape)
+        return indices
 
     def forward(self, indices: torch.Tensor):
         """
         :param indices: input token indices (batch_size, seq_len)
         :return: logits for next token prediction (batch_size, seq_len, vocab_size)
         """
-        # add batch dimension if not present
-        if len(indices.shape) == 1:
-            indices = indices.unsqueeze(0) # (1, seq_len)
         
-        """
-        Below handles cases where input sequence length is not equal to model's expected seq_len (mainly for inferencing as training before calling forward will handle this)
-        """
-        # if input sequence is longer than seq_len, truncate to last seq_len tokens
-        if indices.shape[1] > self.seq_len:
-            # print("BEFORE TRUNCATE:", indices.shape)
-            indices = indices[:, -self.seq_len:] # (batch_size, seq_len)
-            # print("AFTER TRUNCATE:", indices.shape)
-        
-        # NO LONGER NEED TO PAD BC Using dynamic masking (mask is size of input sequence length)
-        # if indices.shape[1] < self.seq_len:
-        #     # pad at the beginning if sequence is shorter than seq_len
-        #     pad_length = self.seq_len - indices.shape[1]
-        #     # pad_idx = self.char_embedding.padding_idx
-        #     pad_idx = self.vocab_index.index_of(' ')
-        #     pad_tensor = torch.full((indices.shape[0], pad_length), pad_idx, dtype=torch.long, device=indices.device) # (batch_size, pad_length)
-        #     indices = torch.cat([pad_tensor, indices], dim=1) # (batch_size, seq_len)
-        #     # print("\n\nPADDED INDICES:", indices)
-        
-        
-        
-        # print("\n\nBEFORE SHIFT INDICES:", indices, indices.shape)
-        # shift tokens right by 1 position for next token prediction
-        indices = torch.roll(indices, shifts=1, dims=1) 
-        # print("\n\nAFTER SHIFT INDICES:", indices)
-        
-        # replace first position with BOS token (here is ' ' space) to each sequence in batch
-        space_idx = self.vocab_index.index_of(self.BOS_token)
-        indices[:, 0] = space_idx
-        # print("\n\nAFTER INSERT BOS INDICES:", indices, indices.shape)
         
         # NOTE: we do above shifting and BOS token insertion before embedding bc the BOS token is part of the vocab and has a learned embedding
         x = self.char_embedding(indices)
@@ -214,7 +211,7 @@ class TransformerNextToken(torch.nn.Module):
         #print(x.shape)
         
         
-        x = self.embedding_dropout(x)
+        # x = self.embedding_dropout(x)
 
 
         
@@ -337,6 +334,14 @@ def word_aligned_sliding_chunks(text: str, seq_len: int, stride: int = 1, vocab_
         chunks.append(idxs)
     return chunks
 
+def print_text_chunks(chunks: List[List[int]], vocab_index):
+    for i in range(len(chunks)):
+        chunk = []
+        for j in range(len(chunks[i])):
+            chunk.append(vocab_index.get_object(chunks[i][j]))
+        print(f"Chunk {i}: ", ''.join(chunk))
+   
+
 def train_lm(args, train_text, dev_text, vocab_index):
     """
     :param args: command-line args, passed through here for your convenience
@@ -356,24 +361,42 @@ def train_lm(args, train_text, dev_text, vocab_index):
     BOS_token = ' '
     
     # seq_len=20
+    # batch_size=1000  # NOTE : batch_size * seq_len has to be divisible by len(train_text)-> 100k, for batching to work properly
     # nhead=4
     # d_model=128
     # dim_feedforward=d_model*4
     # num_layers=2
-    #stride=1
+    # num_epochs=5
     
-    seq_len=30
-    nhead=4
-    d_model=128
-    dim_feedforward=d_model*4
+    # TA approved hyperparameters:
+    # seq_len=20
+    # batch_size=100  # if batch size larger will need more epochs, with batch size 100, epochs=5 is good
+    # nhead=2
+    # d_model=64
+    # dim_feedforward=d_model*4
+    # num_layers=2
+    # num_epochs=5
+    
+    seq_len=50
+    batch_size=200  # if batch size larger will need more epochs, with batch size 100, epochs=5 is good
+    nhead=2
+    d_model=64
+    dim_feedforward=128
     num_layers=2
-    dropout=0.1
     num_epochs=10
-    batch_size=256 # larger batch size for better generalization
+    
+    # seq_len=30
+    # nhead=4
+    # d_model=128
+    # dim_feedforward=d_model*4
+    # num_layers=2
+    dropout=0.1
+    # num_epochs=10
+    # batch_size=256 # larger batch size for better generalization
     
     # DO NOT set striding to 1 or too low, will overfit and not generalize well (seeing too many of same samples basically since overlapping strongly)
-    stride = max(1, seq_len // 2)
-    #stride=1 # striding at extreme (every sample is just shifted by 1 (lots of overlapping))
+    #stride = max(1, seq_len // 2)
+    stride=1 # striding at extreme (every sample is just shifted by 1 (lots of overlapping))
     #stride=seq_len # no overlap, basically no striding
     
     model = TransformerNextToken(nhead=nhead, dim_feedforward=dim_feedforward,
@@ -382,29 +405,27 @@ def train_lm(args, train_text, dev_text, vocab_index):
     model.train()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2) 
+    # optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2) 
+    optimizer = optim.Adam(model.parameters(), lr=1e-4) 
     # simple scheduler: multiply LR by 0.9 every epoch
     #scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=1) # gamma is factor to multiply LR by
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-5)
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-5)
     # loss_fn = nn.CrossEntropyLoss(ignore_index=model.char_embedding.padding_idx) # applies softmax internally
     # Use NLLLoss and pass log-probabilities into it
     loss_fn = nn.NLLLoss()
     
     train_indices = text_to_indices(train_text, vocab_index)
     # train_chunks = chunk_non_overlapping(train_indices, seq_len=model.seq_len, drop_last=True, random_offset=False)
+    
+    # batch first then chunk
+    # do not peform striding for chunking
+    
+    
     drop_short = True
     train_chunks = sliding_window_chunks(train_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short) # must drop short for batching to work (cant have a sample with different seq_len)
     #train_chunks = word_aligned_sliding_chunks(train_text, seq_len=model.seq_len, stride=stride, vocab_index=vocab_index, drop_short=drop_short, lookback_limit=40)
     
-    print_text_chunks = False
-    if print_text_chunks:
-        # flatten train_chunks
-        for i in range(len(train_chunks)):
-            chunk=[]
-            for j in range(len(train_chunks[i])):
-                chunk.append(vocab_index.get_object(train_chunks[i][j]))
-            print(f"Chunk {i}: ", ''.join(chunk))
-        exit()
+    
     
     for epoch in range(0, num_epochs):
         cur_lr = optimizer.param_groups[0]['lr']
@@ -416,13 +437,27 @@ def train_lm(args, train_text, dev_text, vocab_index):
         random.shuffle(train_chunks)
         for b in range(0, len(train_chunks), batch_size):
             batch_chunks = train_chunks[b:b+batch_size]
-            batch_tensor = torch.tensor(np.array(batch_chunks), dtype=torch.long).to(device) # (batch_size, seq_len)
-            # print("INPUT to MODEL shape:", batch_tensor.shape)
-            logits = model(batch_tensor) # (batch_size, seq_len, vocab_size)
+
+        # batches = [train_indices[i:i + batch_size * seq_len] for i in range(0, len(train_indices), batch_size * seq_len)]
+        # # print("BATCHES shape: ", np.shape(batches))
+        # random.shuffle(batches)
+
+        # # for b in range(0, len(train_indices) - batch_size, batch_size):
+        # #     batch_indices = train_indices[b:b+batch_size]
+        # for batch_indices in batches:
+        #     batch_chunks = sliding_window_chunks(batch_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short)
+            # print("BATCH CHUNKS shape: ", np.shape(batch_chunks))
+            # print_text_chunks(batch_chunks, vocab_index)
+            # exit()
+            
+            batch_tensor_targets = torch.tensor(np.array(batch_chunks), dtype=torch.long).to(device) # (batch_size, seq_len)
+            #print("INPUT to MODEL shape:", batch_tensor.shape)
+            batch_tensor_train = model.preprocess_input(batch_tensor_targets, training=True) # (batch_size, seq_len) with tokens shifted and BOS token inserted
+            logits = model(batch_tensor_train) # (batch_size, seq_len, vocab_size)
             # print("OUTPUT from MODEL shape:", logits.shape)
             # Collapse batch dim for cross entropy loss funct
             logits = logits.reshape(-1, logits.shape[-1]) # (batch_size * seq_len, vocab_size)
-            targets = batch_tensor.reshape(-1) # (batch_size * seq_len,) 
+            targets = batch_tensor_targets.reshape(-1) # (batch_size * seq_len,) 
             # Ground truth targets are the token index (from vocab) expected at each position
             # print("LOSS logits shape:", logits.shape)
             # print("LOSS targets shape:", targets.shape)
@@ -430,7 +465,7 @@ def train_lm(args, train_text, dev_text, vocab_index):
             loss = loss_fn(logits, targets)
             loss.backward()
             # gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             model.zero_grad()
             
@@ -447,29 +482,29 @@ def train_lm(args, train_text, dev_text, vocab_index):
         train_ppl = float(np.exp(avg_train_loss))
         print(f"Epoch {epoch} training avg loss (nats/token): {avg_train_loss:.6f}, perplexity: {train_ppl:.4f}")
 
-        # evaluate on dev set each epoch using same sliding window stride
-        model.eval()
-        with torch.no_grad():
-            dev_indices = text_to_indices(dev_text, vocab_index)
-            dev_chunks = sliding_window_chunks(dev_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short)
-            total_dev_loss_tokens = 0.0
-            total_dev_tokens = 0
-            for b in range(0, len(dev_chunks), batch_size):
-                batch_chunks = dev_chunks[b:b+batch_size]
-                batch_tensor = torch.tensor(np.array(batch_chunks), dtype=torch.long).to(device)
-                logits = model(batch_tensor)
-                logits = logits.reshape(-1, logits.shape[-1])
-                targets = batch_tensor.reshape(-1)
-                loss = loss_fn(logits, targets)
-                n_tokens = len(targets)  # all tokens count since we are not using ignore_index in loss_fn
-                if n_tokens > 0:
-                    total_dev_loss_tokens += loss.item() * n_tokens
-                    total_dev_tokens += n_tokens
-        avg_dev_loss = total_dev_loss_tokens / max(1, total_dev_tokens)
-        dev_ppl = float(np.exp(avg_dev_loss))
-        print(f"Epoch {epoch} dev   avg loss (nats/token): {avg_dev_loss:.6f}, perplexity: {dev_ppl:.4f}")
-        # update learning rate for next epoch (step per epoch)
-        scheduler.step()
+        # # evaluate on dev set each epoch using same sliding window stride
+        # model.eval()
+        # with torch.no_grad():
+        #     dev_indices = text_to_indices(dev_text, vocab_index)
+        #     dev_chunks = sliding_window_chunks(dev_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short)
+        #     total_dev_loss_tokens = 0.0
+        #     total_dev_tokens = 0
+        #     for b in range(0, len(dev_chunks), batch_size):
+        #         batch_chunks = dev_chunks[b:b+batch_size]
+        #         batch_tensor = torch.tensor(np.array(batch_chunks), dtype=torch.long).to(device)
+        #         logits = model(batch_tensor)
+        #         logits = logits.reshape(-1, logits.shape[-1])
+        #         targets = batch_tensor.reshape(-1)
+        #         loss = loss_fn(logits, targets)
+        #         n_tokens = len(targets)  # all tokens count since we are not using ignore_index in loss_fn
+        #         if n_tokens > 0:
+        #             total_dev_loss_tokens += loss.item() * n_tokens
+        #             total_dev_tokens += n_tokens
+        # avg_dev_loss = total_dev_loss_tokens / max(1, total_dev_tokens)
+        # dev_ppl = float(np.exp(avg_dev_loss))
+        # print(f"Epoch {epoch} dev   avg loss (nats/token): {avg_dev_loss:.6f}, perplexity: {dev_ppl:.4f}")
+        # # update learning rate for next epoch (step per epoch)
+        # #scheduler.step()
         model.train()
     model.eval() 
     return NeuralLanguageModel(model, vocab_index)
