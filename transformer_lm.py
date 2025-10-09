@@ -143,7 +143,7 @@ class TransformerNextToken(torch.nn.Module):
             # shift tokens right by 1 position for next token prediction
             indices = torch.roll(indices, shifts=1, dims=1) 
             # replace first position with BOS token (here is ' ' space) to each sequence in the batch
-            indices[:, 0] = self.vocab_index.index_of(self.BOS_token)
+            indices[:, 0] = self.vocab_index.index_of(' ')
         return indices # (batch_size, seq_len)
 
     def forward(self, indices: torch.Tensor):
