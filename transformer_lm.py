@@ -305,7 +305,7 @@ def train_lm(args, train_text, dev_text, vocab_index):
     train_chunks = sliding_window_chunks(train_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short) # must drop short for batching to work (cant have a sample with different seq_len)
     
     num_epochs = 5
-    batch_size = 1
+    batch_size = 32
     for epoch in range(0, num_epochs):
         cur_lr = optimizer.param_groups[0]['lr']
         print(f"Starting epoch {epoch} - lr={cur_lr:.6e}")
