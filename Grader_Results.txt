@@ -2,3 +2,5 @@ Letter Counting
 {"accuracy": 99.35000000000001, "time_taken": 33.17565178871155}
 Language Modeling
 {"sane": true, "normalizes": true, "range": true, "log_prob": -933.8103492408991, "avg_log_prob": -1.8676206984817982, "perplexity": 6.4728771366250095, "time_taken": 666.0227658748627}
+
+Grade: 100/100
