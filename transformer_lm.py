@@ -74,8 +74,9 @@ class NeuralLanguageModel(LanguageModel):
         with torch.no_grad():
             # print("Context tensor:", context_tensor)
             logits = self.model(context_tensor) # (1, seq_len, vocab_size)
-            last_logits = logits[0, -1, :] # (vocab_size,) , acquire logits for last position
-            log_probs = torch.log_softmax(last_logits, dim=0) # (vocab_size,)
+            #last_logits = logits[0, -1, :] # (vocab_size,) , acquire logits for last position
+            #log_probs = torch.log_softmax(last_logits, dim=0) # (vocab_size,)
+            log_probs = logits[0, -1, :]  # (vocab_size,) , already log-probabilities from model output
             # print(log_probs)
         return log_probs.cpu().numpy()
 
@@ -90,6 +91,7 @@ class NeuralLanguageModel(LanguageModel):
         
         if context == "":
             cur_context = " "
+        # context_was_empty = (context == "")
         
         # if next_chars is a string, 
         for c in next_chars:
@@ -98,6 +100,11 @@ class NeuralLanguageModel(LanguageModel):
             logp = self.get_next_char_log_probs(cur_context)  # numpy array of log-probs
             char_idx = self.vocab_index.index_of(c)
             total_log_prob += float(logp[char_idx])
+            # if context_was_empty:
+            #     context_was_empty = False
+            #     cur_context = c
+            # else:
+            #     cur_context = cur_context + c
             cur_context = cur_context + c
         return total_log_prob
     
@@ -145,12 +152,13 @@ class TransformerNextToken(torch.nn.Module):
         self.linear_out = nn.Linear(d_model, vocab_size)
         self.seq_len = seq_len
         self.vocab_index = vocab_index
-        nn.init.xavier_uniform_(self.char_embedding.weight)
-        # # ensure padding token weights is zero after intialization to prevent it from being updated during training
-        # # with torch.no_grad():
-        # #     self.char_embedding.weight[self.char_embedding.padding_idx].zero_()
-        nn.init.xavier_uniform_(self.linear_out.weight)
+        # nn.init.xavier_uniform_(self.char_embedding.weight)
+        # # # ensure padding token weights is zero after intialization to prevent it from being updated during training
+        # # # with torch.no_grad():
+        # # #     self.char_embedding.weight[self.char_embedding.padding_idx].zero_()
+        # nn.init.xavier_uniform_(self.linear_out.weight)
         self.BOS_token = BOS_token
+        self.log_softmax = nn.LogSoftmax(dim=-1) # for NLLLoss
 
     def forward(self, indices: torch.Tensor):
         """
@@ -178,7 +186,7 @@ class TransformerNextToken(torch.nn.Module):
         
         
         
-        # print("\n\nBEFORE SHIFT INDICES:", indices)
+        # print("\n\nBEFORE SHIFT INDICES:", indices, indices.shape)
         # shift tokens right by 1 position for next token prediction
         indices = torch.roll(indices, shifts=1, dims=1) 
         # print("\n\nAFTER SHIFT INDICES:", indices)
@@ -186,12 +194,12 @@ class TransformerNextToken(torch.nn.Module):
         # replace first position with BOS token (here is ' ' space) to each sequence in batch
         space_idx = self.vocab_index.index_of(self.BOS_token)
         indices[:, 0] = space_idx
-        # print("\n\nAFTER INSERT BOS INDICES:", indices)
+        # print("\n\nAFTER INSERT BOS INDICES:", indices, indices.shape)
         
         # NOTE: we do above shifting and BOS token insertion before embedding bc the BOS token is part of the vocab and has a learned embedding
         x = self.char_embedding(indices)
         # print("\n\nCHAR EMBEDDING OUTPUT:", x)
-        # print(x.shape)
+        #print(x.shape)
         
         
         x = self.positional_encoding(x) # adds positional encoding to char embeddings
@@ -202,10 +210,14 @@ class TransformerNextToken(torch.nn.Module):
         # but only a problem if larger than seq_len (outside of postional embedding's vocab)
         input_seq_len = x.shape[1] 
         mask=torch.nn.Transformer.generate_square_subsequent_mask(sz=input_seq_len).to(x.device) # (seq_len, seq_len) causal mask
-        
+        # print("MASK shape: ", mask.shape)
         
         x = self.transformer_encoder(x, mask=mask, is_causal=True) # (batch_size, seq_len, d_model)
+        # print("\n\nTRANSFORMER OUTPUT Shape:", x.shape)
         x = self.linear_out(x) # (batch_size, seq_len, vocab_size)
+        # print("\n\nFINAL LINEAR OUTPUT Shape:", x.shape)
+        
+        x = self.log_softmax(x) # (batch_size, seq_len, vocab_size) log-probabilities for NLLLoss
         return x
 
 def text_to_indices(text: str, vocab_index) -> List[int]:
@@ -278,8 +290,8 @@ def train_lm(args, train_text, dev_text, vocab_index):
     #stride=1
     
     seq_len=20
-    nhead=2
-    d_model=128
+    nhead=4 # 4
+    d_model=32
     dim_feedforward=d_model*4
     num_layers=2
     
@@ -289,23 +301,24 @@ def train_lm(args, train_text, dev_text, vocab_index):
     model.train()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=3e-4) 
     # simple scheduler: multiply LR by 0.9 every epoch
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=1) # no need for schedueler
     # loss_fn = nn.CrossEntropyLoss(ignore_index=model.char_embedding.padding_idx) # applies softmax internally
-    loss_fn = nn.CrossEntropyLoss()
+    # Use NLLLoss and pass log-probabilities into it
+    loss_fn = nn.NLLLoss()
     
     train_indices = text_to_indices(train_text, vocab_index)
-    # train_chunks = chunk_non_overlapping(train_indices, seq_len=model.seq_len, drop_last=True, random_offset=False)
+    train_chunks = chunk_non_overlapping(train_indices, seq_len=model.seq_len, drop_last=True, random_offset=False)
     # use overlapping sliding window chunks with half-overlap by default
-    stride = max(1, model.seq_len // 2)
-    # stride=1 # striding at extreme (every sample is just shifted by 1 (lots of overlapping))
-    # stride=model.seq_len # no overlap, basically no striding
+    #stride = max(1, model.seq_len // 2)
+    #stride=1 # striding at extreme (every sample is just shifted by 1 (lots of overlapping))
+    stride=model.seq_len # no overlap, basically no striding
     drop_short = True
-    train_chunks = sliding_window_chunks(train_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short) # must drop short for batching to work (cant have a sample with different seq_len)
+    #train_chunks = sliding_window_chunks(train_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short) # must drop short for batching to work (cant have a sample with different seq_len)
     
-    num_epochs = 5
-    batch_size = 32
+    num_epochs = 4
+    batch_size = 64
     for epoch in range(0, num_epochs):
         cur_lr = optimizer.param_groups[0]['lr']
         print(f"Starting epoch {epoch} - lr={cur_lr:.6e}")
@@ -317,16 +330,22 @@ def train_lm(args, train_text, dev_text, vocab_index):
         for b in range(0, len(train_chunks), batch_size):
             batch_chunks = train_chunks[b:b+batch_size]
             batch_tensor = torch.tensor(np.array(batch_chunks), dtype=torch.long).to(device) # (batch_size, seq_len)
+            # print("INPUT to MODEL shape:", batch_tensor.shape)
             logits = model(batch_tensor) # (batch_size, seq_len, vocab_size)
+            # print("OUTPUT from MODEL shape:", logits.shape)
             # Collapse batch dim for cross entropy loss funct
             logits = logits.reshape(-1, logits.shape[-1]) # (batch_size * seq_len, vocab_size)
             targets = batch_tensor.reshape(-1) # (batch_size * seq_len,) 
             # Ground truth targets are the token index (from vocab) expected at each position
-
+            # print("LOSS logits shape:", logits.shape)
+            # print("LOSS targets shape:", targets.shape)
+            # exit()
             loss = loss_fn(logits, targets)
             loss.backward()
             optimizer.step()
             model.zero_grad()
+            
+          
 
             # loss.item() is mean over non-ignored tokens in this batch; recover summed loss by multiplying
             # n_tokens = int((targets != model.char_embedding.padding_idx).sum().item())
