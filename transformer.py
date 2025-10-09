@@ -209,6 +209,8 @@ class PositionalEncoding(nn.Module):
         self.emb = nn.Embedding(num_positions, d_model) # create embeddings for positions
         self.batched = batched       
         nn.init.xavier_uniform_(self.emb.weight) # initialize positional embedding weights
+        #nn.init.normal_(self.emb.weight, mean=0.0, std=0.02)
+
 
     # call this class to add positional encodings to the char embeddings (x is the char embeddings)
     def forward(self, x):

@@ -123,7 +123,7 @@ class TransformerNextToken(torch.nn.Module):
     """
     Implement transformer using torch nn.TransformerEncoder and nn.TransformerEncoderLayer for next-token predicting task. Now given long continous sequence of characters and need to split into chunks of max length. Use causal mask and positional encoding from part 1.
     """
-    def __init__(self, vocab_size: int=27, d_model: int=512, nhead: int=8, num_layers: int=6, dim_feedforward: int=2048, seq_len: int=20, vocab_index: Indexer=None, pad_token: str=' ', BOS_token: str=' '):
+    def __init__(self, vocab_size: int=27, d_model: int=512, nhead: int=8, num_layers: int=6, dim_feedforward: int=2048, seq_len: int=20, vocab_index: Indexer=None, pad_token: str=' ', BOS_token: str=' ', dropout: float=0.1):
         """
         :param vocab_size: size of character vocabulary (27)
         :param d_model: embedding dimension (512)
@@ -144,7 +144,7 @@ class TransformerNextToken(torch.nn.Module):
         # IMPORTANT: we want to add the padding token to our embedding but not our vocabulary Indexer
         # self.char_embedding = nn.Embedding(vocab_size+1, d_model, padding_idx=vocab_size) 
         self.positional_encoding = PositionalEncoding(d_model, seq_len, batched=True)
-        dropout=0.1
+        dropout=dropout
         # add dropout for regularization (better generalization)
         self.embedding_dropout = nn.Dropout(p=dropout)
         self.transformer_encoder = nn.TransformerEncoder(
@@ -155,7 +155,8 @@ class TransformerNextToken(torch.nn.Module):
         )
         self.linear_out = nn.Linear(d_model, vocab_size)
        
-        #nn.init.xavier_uniform_(self.char_embedding.weight)
+        # nn.init.xavier_uniform_(self.char_embedding.weight)
+        # nn.init.xavier_uniform_(self.linear_out.weight)
         nn.init.normal_(self.char_embedding.weight, mean=0.0, std=0.02)
         self.linear_out.weight = self.char_embedding.weight
         nn.init.zeros_(self.linear_out.bias)
@@ -213,13 +214,13 @@ class TransformerNextToken(torch.nn.Module):
         #print(x.shape)
         
         
-        
+        x = self.embedding_dropout(x)
+
+
         
         x = self.positional_encoding(x) # adds positional encoding to char embeddings
         #x = x + get_positional_encoding(self.seq_len, x.shape[-1]).to(x.device) 
          
-         
-        x = self.embedding_dropout(x)
         
         # make mask dynamic so dont have to do padding , embedding layer simply adds embeddings for given indices, 
         # so no problem if input shorter than model seq_len. only layer seq_len matters is for PostiionalEncoding 
@@ -280,6 +281,62 @@ def sliding_window_chunks(indices: List[int], seq_len: int, stride: int = 1, dro
             chunks.append(tail)
     return chunks
 
+import string
+
+def word_aligned_sliding_chunks(text: str, seq_len: int, stride: int = 1, vocab_index=None, drop_short: bool=True, lookback_limit: int = 40):
+    """
+    Create sliding windows but only start windows at word boundary (space/punctuation) positions.
+    - text: full string
+    - lookback_limit: when a candidate start is mid-word, look back up to this many chars to find a boundary;
+                      if none found, skip or shift forward to next boundary.
+    Returns list[list[int]] of token indices.
+    """
+    if vocab_index is None:
+        raise ValueError("vocab_index required")
+    n = len(text)
+    starts = list(range(0, n - seq_len + 1, stride))
+    valid_starts = []
+    boundaries = set([' ', '\t', '\n']) | set(string.punctuation)
+    for s in starts:
+        # if the character at s is a boundary (space or punctuation), accept
+        if s == 0 or text[s] in boundaries:
+            valid_starts.append(s)
+            continue
+        # otherwise attempt to find a prior boundary within lookback_limit
+        b = s
+        found = False
+        for back in range(1, min(lookback_limit, s) + 1):
+            if text[s-back] in boundaries:
+                # align start to character after the boundary (so word begins at s-back+1)
+                new_start = s - back + 1
+                # ensure we still have seq_len chars from new_start
+                if new_start + seq_len <= n:
+                    valid_starts.append(new_start)
+                    found = True
+                break
+        if not found:
+            # as fallback, try moving forward to next boundary within lookback_limit
+            for f in range(1, min(lookback_limit, n - s)):
+                if text[s + f] in boundaries:
+                    new_start = s + f + 1
+                    if new_start + seq_len <= n:
+                        valid_starts.append(new_start)
+                    break
+            # if still can't find, skip this start
+    # deduplicate and sort starts
+    valid_starts = sorted(set(valid_starts))
+    chunks = []
+    for s in valid_starts:
+        chunk = text[s:s+seq_len]
+        if len(chunk) < seq_len:
+            if not drop_short:
+                idxs = [vocab_index.index_of(c) for c in chunk]
+                chunks.append(idxs)
+            continue
+        idxs = [vocab_index.index_of(c) for c in chunk]
+        chunks.append(idxs)
+    return chunks
+
 def train_lm(args, train_text, dev_text, vocab_index):
     """
     :param args: command-line args, passed through here for your convenience
@@ -306,13 +363,13 @@ def train_lm(args, train_text, dev_text, vocab_index):
     #stride=1
     
     seq_len=30
-    nhead=8
-    d_model=64
+    nhead=4
+    d_model=128
     dim_feedforward=d_model*4
     num_layers=2
-    
-    num_epochs = 10
-    batch_size = 128 # larger batch size for better generalization
+    dropout=0.1
+    num_epochs=10
+    batch_size=256 # larger batch size for better generalization
     
     # DO NOT set striding to 1 or too low, will overfit and not generalize well (seeing too many of same samples basically since overlapping strongly)
     stride = max(1, seq_len // 2)
@@ -320,7 +377,7 @@ def train_lm(args, train_text, dev_text, vocab_index):
     #stride=seq_len # no overlap, basically no striding
     
     model = TransformerNextToken(nhead=nhead, dim_feedforward=dim_feedforward,
-                                 d_model=d_model, num_layers=num_layers, vocab_size=len(vocab_index), vocab_index=vocab_index, pad_token=pad_token, seq_len=seq_len, BOS_token=BOS_token)
+                                 d_model=d_model, num_layers=num_layers, vocab_size=len(vocab_index), vocab_index=vocab_index, pad_token=pad_token, seq_len=seq_len, BOS_token=BOS_token, dropout=dropout)
     model.zero_grad()
     model.train()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -337,6 +394,17 @@ def train_lm(args, train_text, dev_text, vocab_index):
     # train_chunks = chunk_non_overlapping(train_indices, seq_len=model.seq_len, drop_last=True, random_offset=False)
     drop_short = True
     train_chunks = sliding_window_chunks(train_indices, seq_len=model.seq_len, stride=stride, drop_short=drop_short) # must drop short for batching to work (cant have a sample with different seq_len)
+    #train_chunks = word_aligned_sliding_chunks(train_text, seq_len=model.seq_len, stride=stride, vocab_index=vocab_index, drop_short=drop_short, lookback_limit=40)
+    
+    print_text_chunks = False
+    if print_text_chunks:
+        # flatten train_chunks
+        for i in range(len(train_chunks)):
+            chunk=[]
+            for j in range(len(train_chunks[i])):
+                chunk.append(vocab_index.get_object(train_chunks[i][j]))
+            print(f"Chunk {i}: ", ''.join(chunk))
+        exit()
     
     for epoch in range(0, num_epochs):
         cur_lr = optimizer.param_groups[0]['lr']
