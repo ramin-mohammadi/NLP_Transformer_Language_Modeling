@@ -266,7 +266,7 @@ def train_lm(args, train_text, dev_text, vocab_index):
     train_indices = text_to_indices(train_text, vocab_index)     
     #stride = max(1, seq_len // 2)
     #stride=seq_len # no overlap, basically no striding
-    stride=1 # striding at extreme (every sample is just shifted by 1 (lots of overlapping))
+    stride=1 # striding at extreme (every sample is just shifted by 1 (lots of overlapping)). NOTE: Striding improved perplexity
     # must drop_short for batching to work (cant have a sample with different seq_len when using batching)
     train_chunks = sliding_window_chunks(train_indices, seq_len=model.seq_len, stride=stride, drop_short=True) 
 
