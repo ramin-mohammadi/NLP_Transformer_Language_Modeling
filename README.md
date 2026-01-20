@@ -1,5 +1,5 @@
 # Transformer Language Modeling on text8 Dataset (PyTorch) 
-- Transformer implementation, provided solid base understanding and reference for autoregressive language modeling
+- Solid base understanding and reference for autoregressive language modeling
   - transformer_lm.py
   - transformer.py
   - lm.py
