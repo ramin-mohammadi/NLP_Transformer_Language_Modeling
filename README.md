@@ -1,4 +1,5 @@
 # Transformer Language Modeling on text8 Dataset (PyTorch) 
+- Natural Language Processing course at UT Austin during Fall 2025 semester
 - Solid base understanding and reference for autoregressive language modeling
   - transformer_lm.py
   - transformer.py
